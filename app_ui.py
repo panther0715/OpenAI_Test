@@ -18,7 +18,7 @@ endpoint = st.secrets["AZURE_AI_ENDPOINT"]
 api_key  = st.secrets["AZURE_AI_KEY"]
 
 # 画面のタイトル設定
-st.title("🤖 統合資料・画像認識対応 AIアシスタント (RAG)")
+st.title("統合資料・画像認識対応 AIアシスタント (RAG)")
 st.caption("PDF、Word、Excel、および画像ファイル（図）をまとめて同時に読み込んで質問できます")
 
 client = OpenAI(base_url=endpoint, api_key=api_key)
@@ -28,7 +28,7 @@ if "extracted_images" not in st.session_state:
     st.session_state.extracted_images = []
 
 with st.sidebar:
-    st.header("📄 資料・図のアップロード")
+    st.header("資料・図のアップロード")
     # ★ 拡張子に「png」「jpg」「jpeg」を追加して、図の画像を直接ドロップできるように解放
     uploaded_files = st.file_uploader(
         "ファイルを選択してください（複数可）", 
@@ -81,7 +81,7 @@ with st.sidebar:
                 img_data = uploaded_file.read()
                 img_str = base64.b64encode(img_data).decode('utf-8')
                 st.session_state.extracted_images.append(img_str)
-                st.success(f"📸 図・画像「{uploaded_file.name}」を正常に認識しました")
+                st.success(f"図・画像「{uploaded_file.name}」を正常に認識しました")
 
 # チャット履歴を保持する仕組み
 if "messages" not in st.session_state:
