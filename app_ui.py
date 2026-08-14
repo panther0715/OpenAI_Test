@@ -12,8 +12,10 @@ import base64
 load_dotenv("D:\\OpenAI_Test\\func.env")
 
 # ★環境変数から安全にURLとキーを取得（コード上に直接書かない！）
-endpoint = os.getenv("AZURE_AI_ENDPOINT")
-api_key = os.getenv("AZURE_AI_KEY")
+#endpoint = os.getenv("AZURE_AI_ENDPOINT")
+#api_key = os.getenv("AZURE_AI_KEY")
+endpoint = st.secrets["AZURE_AI_ENDPOINT"]
+api_key  = st.secrets["AZURE_AI_KEY"]
 
 # 画面のタイトル設定
 st.title("🤖 統合資料・画像認識対応 AIアシスタント (RAG)")
