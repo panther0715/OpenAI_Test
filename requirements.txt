@@ -3,3 +3,4 @@ pypdf
 python-docx
 pandas
 openpyxl
+python-dotenv
