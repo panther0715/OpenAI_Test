@@ -6,6 +6,7 @@ from pypdf import PdfReader
 from docx import Document
 import pandas as pd
 import base64
+import sys
 import tempfile
 import shutil
 from openpyxl import load_workbook
@@ -42,9 +43,18 @@ def extract_excel_diagrams_via_com(file_bytes, filename):
     try:
         import win32com.client as win32
     except ImportError:
+        # ★診断用: このStreamlitプロセスが実際にどのpython.exeで動いているかを表示する。
+        # 「別のターミナル/仮想環境にpywin32を入れたのに反映されない」場合は、
+        # ここに表示されたパスと、pip installを実行したPythonのパスが違うことが多い。
         st.warning(
-            "図形・オブジェクトの抽出には pywin32 が必要です。"
-            "コマンドプロンプトで `pip install pywin32` を実行してください。"
+            "図形・オブジェクトの抽出には pywin32 が必要です。\n\n"
+            f"現在このStreamlitアプリを実行しているPython: `{sys.executable}`\n\n"
+            "このPythonに対して以下を実行してから、"
+            "**streamlit runしているターミナルを完全に一度停止（Ctrl+C）して再起動**してください"
+            "（ブラウザの「Rerun」だけではプロセスが再起動されず反映されません）。\n\n"
+            f"```\n\"{sys.executable}\" -m pip install pywin32\n"
+            f"\"{os.path.dirname(sys.executable)}\\python.exe\" "
+            f"\"{os.path.dirname(sys.executable)}\\Scripts\\pywin32_postinstall.py\" -install\n```"
         )
         return images
 
