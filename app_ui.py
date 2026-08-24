@@ -300,20 +300,28 @@ def answer_to_excel_bytes(answer_text):
 if "extracted_images" not in st.session_state:
     st.session_state.extracted_images = []
 
+# ★重要: 抽出したテキストも画像と同じくsession_stateで永続化する。
+# 以前はローカル変数（combined_text = ""）で、uploaded_filesが空の実行時には
+# 毎回リセットされてしまっていた。extracted_imagesはsession_state管理で
+# 消えない一方、combined_textだけが消えるという非対称な状態になり、
+# 「画像は見えるがCSV等のテキスト内容が見えない」という症状の原因になっていたため、
+# 画像と全く同じ永続化の仕組みに揃える。
+if "combined_text" not in st.session_state:
+    st.session_state.combined_text = ""
+
 with st.sidebar:
     st.header("資料・図のアップロード")
-    # ★ 拡張子に「png」「jpg」「jpeg」を追加して、図の画像を直接ドロップできるように解放
+    # ★ 拡張子に「png」「jpg」「jpeg」「csv」を追加して、図やCSVを直接ドロップできるように解放
     uploaded_files = st.file_uploader(
-        "ファイルを選択してください（複数可）", 
-        type=["pdf", "docx", "xlsx", "png", "jpg", "jpeg"],
+        "ファイルを選択してください（複数可）",
+        type=["pdf", "docx", "xlsx", "csv", "png", "jpg", "jpeg"],
         accept_multiple_files=True
     )
-    
-    combined_text = ""
-    
+
     if uploaded_files:
         st.session_state.extracted_images = []
-        
+        combined_text = ""
+
         for uploaded_file in uploaded_files:
             file_ext = uploaded_file.name.split(".")[-1].lower()
             
@@ -390,7 +398,19 @@ with st.sidebar:
                         f"「{uploaded_file.name}」内の図形・構成図 {len(diagram_images)} 件をAIの「目」として抽出しました"
                     )
 
-            # ④ ★新機能: 画像ファイル（図）が直接アップロードされた場合の処理
+            # ④ ★新機能: CSVファイルが直接アップロードされた場合の処理
+            elif file_ext == "csv":
+                try:
+                    df = pd.read_csv(uploaded_file)
+                except Exception:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, encoding="shift_jis")  # 日本語CSVでUTF-8失敗時の保険
+                file_text = df.to_string(index=False)
+                if file_text.strip():
+                    combined_text += f"\n\n--- ファイル名: {uploaded_file.name} ---\n{file_text}"
+                    st.success(f"「{uploaded_file.name}」のテキスト読み込み成功")
+
+            # ⑤ ★新機能: 画像ファイル（図）が直接アップロードされた場合の処理
             elif file_ext in ["png", "jpg", "jpeg"]:
                 img_data = uploaded_file.read()
                 img_str = base64.b64encode(img_data).decode('utf-8')
@@ -400,6 +420,25 @@ with st.sidebar:
                     "mime": img_mime,
                 })
                 st.success(f"図・画像「{uploaded_file.name}」を正常に認識しました")
+
+        # ★アップロード処理が終わった時点の内容を、画像と同じくsession_stateに保存する。
+        # これで、次のチャット送信時にファイルアップローダーが空を返すような実行があっても、
+        # 前回抽出したテキストが画像と一緒に確実に残る。
+        st.session_state.combined_text = combined_text
+
+    # ★デバッグ用: 実際に何がAIに渡っているかをその場で確認できるようにする。
+    # 「テキストが見えていない」「画像しか認識されていない」といった問題の切り分けに使う。
+    with st.expander("🔍 AIに渡す内容を確認（デバッグ用）"):
+        st.write(f"抽出済みテキスト: {len(st.session_state.combined_text)} 文字")
+        if st.session_state.combined_text:
+            st.text_area(
+                "抽出テキストの内容",
+                st.session_state.combined_text,
+                height=200,
+            )
+        else:
+            st.write("テキストは抽出されていません（ファイルが未アップロード、または抽出に失敗しています）。")
+        st.write(f"抽出済み画像: {len(st.session_state.extracted_images)} 枚")
 
 # チャット履歴を保持する仕組み
 if "messages" not in st.session_state:
@@ -425,8 +464,9 @@ if prompt := st.chat_input("アップロードしたすべての資料や図に�
 
     with st.chat_message("assistant"):
         system_instruction = "あなたは優秀なアシスタントです。提供された【参考資料のテキスト情報】、および添付された「画像（図）」の内容を人間の目のように厳密に確認し、ユーザーの質問に正確に答えてください。画像に描かれているネットワーク構成、サブネット名、IPアドレス等の文字情報もすべて読み取って回答に反映してください。"
-        if combined_text:
-            system_instruction += f"\n\n【参考資料のテキスト情報】\n{combined_text}"
+        # ★session_stateから読む（uploaded_filesがこの実行で空でも、前回抽出したテキストを使える）
+        if st.session_state.combined_text:
+            system_instruction += f"\n\n【参考資料のテキスト情報】\n{st.session_state.combined_text}"
 
         # AIに送るメッセージを画像対応のマルチモーダル形式に変換
         content_list = [{"type": "text", "text": prompt}]
