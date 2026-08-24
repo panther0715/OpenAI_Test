@@ -300,7 +300,7 @@ with st.sidebar:
                 if diagram_images:
                     st.session_state.extracted_images.extend(diagram_images)
                     st.success(
-                        f"「{uploaded_file.name}」内の図形・構成図 {len(diagram_images)} 件をAIの「目」として抽出しました"
+                        f"「{uploaded_file.name}」内の図形・構成図 {len(diagram_images)} 件を抽出しました"
                     )
 
             # ④ ★新機能: 画像ファイル（図）が直接アップロードされた場合の処理
@@ -336,7 +336,7 @@ if prompt := st.chat_input("アップロードしたすべての資料や図に�
         # AIに送るメッセージを画像対応のマルチモーダル形式に変換
         content_list = [{"type": "text", "text": prompt}]
         
-        # アップロードされたすべての画像（直接添付＋Excel等から抽出したもの）をAIの「目」として添付する
+        # アップロードされたすべての画像（直接添付＋Excel等から抽出したもの）を添付する
         for img_info in st.session_state.extracted_images:
             content_list.append({
                 "type": "image_url",
