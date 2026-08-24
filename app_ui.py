@@ -226,7 +226,21 @@ def extract_excel_pages_via_libreoffice(file_bytes, filename):
 # Chat Completions APIはテキストしか返せないため、回答文中にMarkdown形式の表（| a | b |...）が
 # 含まれていればそれを解析してpandas.DataFrame化し、表ごとに別シートとして書き出す。
 # 表が見つからない場合も、回答全文を1シートに書き出して必ずダウンロードできるようにする。
+def _clean_caption(raw_lines):
+    # 表の直前にある見出し行（「1. 全体構成（...）」等）をシート名／タイトルとして使えるように、
+    # Markdownの見出し記号（#）や強調記号（**）を軽く取り除く。
+    text_lines = [l.strip() for l in raw_lines if l.strip()]
+    if not text_lines:
+        return ""
+    caption = text_lines[-1]  # 表の直前の行を要約タイトルとして使う
+    caption = re.sub(r'^#+\s*', '', caption)
+    caption = caption.strip('*').strip()
+    return caption
+
+
 def _parse_markdown_tables(text):
+    # 戻り値は (見出しキャプション, DataFrame) のリスト。
+    # 表の直前にある見出し行を「表の要約タイトル」として一緒に持ち出す。
     tables = []
     lines = text.splitlines()
     sep_pattern = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$')
@@ -240,10 +254,13 @@ def _parse_markdown_tables(text):
         return [cell.strip() for cell in row.split("|")]
 
     i = 0
+    pending_lines = []  # 直前の表（または文章の先頭）から、まだ表になっていない行
     while i < len(lines) - 1:
         header_line = lines[i]
         sep_line = lines[i + 1]
         if "|" in header_line and sep_pattern.match(sep_line):
+            caption = _clean_caption(pending_lines)
+            pending_lines = []
             headers = split_row(header_line)
             rows = []
             j = i + 2
@@ -258,11 +275,33 @@ def _parse_markdown_tables(text):
                     r = r[:len(headers)]
                 normalized_rows.append(r)
             if normalized_rows:
-                tables.append(pd.DataFrame(normalized_rows, columns=headers))
+                tables.append((caption, pd.DataFrame(normalized_rows, columns=headers)))
             i = j
         else:
+            pending_lines.append(lines[i])
             i += 1
     return tables
+
+
+_INVALID_SHEET_CHARS = re.compile(r'[\\/*?:\[\]]')
+
+
+def _make_sheet_name(caption, fallback, used_names):
+    # Excelのシート名は31文字まで、\ / ? * [ ] : は使用不可、同名重複も不可。
+    base = _INVALID_SHEET_CHARS.sub(" ", caption or "")
+    base = re.sub(r"\s+", " ", base).strip()
+    if not base:
+        base = fallback
+    base = base[:31]
+
+    name = base
+    suffix = 2
+    while name in used_names:
+        cut = 31 - len(f"_{suffix}")
+        name = f"{base[:cut]}_{suffix}"
+        suffix += 1
+    used_names.add(name)
+    return name
 
 
 def _display_width(text):
@@ -277,29 +316,32 @@ def _display_width(text):
     return width
 
 
-def _apply_table_style(ws, num_rows, num_cols):
+def _apply_table_style(ws, start_row, num_table_rows, num_cols):
     """罫線（外枠：太線／内側：細線）、見出し行（背景色＋太字）、列幅自動調整をまとめて適用する。
     AIの回答テキストにはこうした書式の指定は含められない（pandas.to_excelは値だけを書き込み、
     セルの見た目は一切設定しない）ため、生成側のコードでopenpyxlを使って直接設定する。
+    start_row: 表の見出し行（1行目）がシート上で何行目から始まるか（タイトル行がある場合は2）。
+    num_table_rows: 見出し行を含めた表の行数（len(df) + 1）。
     """
     thin = Side(style="thin", color="000000")
     thick = Side(style="thick", color="000000")
+    end_row = start_row + num_table_rows - 1
 
     # 罫線: 外枠は太線、内側は細線
-    for row in range(1, num_rows + 1):
+    for row in range(start_row, end_row + 1):
         for col in range(1, num_cols + 1):
             cell = ws.cell(row=row, column=col)
             cell.border = Border(
-                top=thick if row == 1 else thin,
-                bottom=thick if row == num_rows else thin,
+                top=thick if row == start_row else thin,
+                bottom=thick if row == end_row else thin,
                 left=thick if col == 1 else thin,
                 right=thick if col == num_cols else thin,
             )
 
-    # 見出し行（1行目）: 背景色（薄い青）＋太字＋中央揃え
+    # 見出し行: 背景色（薄い青）＋太字＋中央揃え
     header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
     for col in range(1, num_cols + 1):
-        cell = ws.cell(row=1, column=col)
+        cell = ws.cell(row=start_row, column=col)
         cell.fill = header_fill
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -308,7 +350,7 @@ def _apply_table_style(ws, num_rows, num_cols):
     for col in range(1, num_cols + 1):
         col_letter = get_column_letter(col)
         max_width = 0
-        for row in range(1, num_rows + 1):
+        for row in range(start_row, end_row + 1):
             value = ws.cell(row=row, column=col).value
             if value is not None:
                 max_width = max(max_width, _display_width(str(value)))
@@ -316,29 +358,48 @@ def _apply_table_style(ws, num_rows, num_cols):
 
 
 def answer_to_excel_bytes(answer_text):
+    # ★新機能: 表の直前にあった見出し（「1. 全体構成（...）」等）を、
+    # シート名にするだけでなく、表そのものの1行目にタイトルとして書き込む。
+    # 以前は表データだけを書き込んでいたため、AIが見出しを答えに含めていても
+    # Excel側には反映されなかった（読み込み内容とは無関係に、生成コードが単に使っていなかった）。
     output = io.BytesIO()
-    tables = _parse_markdown_tables(answer_text)
+    parsed = _parse_markdown_tables(answer_text)
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        if tables:
-            sheet_names = []
-            for idx, df in enumerate(tables, start=1):
-                sheet_name = f"表{idx}"[:31]
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                sheet_names.append((sheet_name, len(df) + 1, len(df.columns)))
-            answer_sheet_name = "回答全文"[:31]
+        used_names = set()
+        sheet_infos = []  # (sheet_name, caption, start_row, num_table_rows, num_cols)
+
+        if parsed:
+            for idx, (caption, df) in enumerate(parsed, start=1):
+                sheet_name = _make_sheet_name(caption, f"表{idx}", used_names)
+                if caption:
+                    # 1行目にタイトル、2行目から表本体（見出し行+データ）を書き込む
+                    df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                    start_row = 2
+                else:
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    start_row = 1
+                sheet_infos.append((sheet_name, caption, start_row, len(df) + 1, len(df.columns)))
+
+            answer_sheet_name = _make_sheet_name("回答全文", "回答全文", used_names)
             answer_df = pd.DataFrame({"回答全文": answer_text.splitlines() or [""]})
             answer_df.to_excel(writer, sheet_name=answer_sheet_name, index=False)
-            sheet_names.append((answer_sheet_name, len(answer_df) + 1, 1))
+            sheet_infos.append((answer_sheet_name, None, 1, len(answer_df) + 1, 1))
         else:
-            answer_sheet_name = "回答"[:31]
+            answer_sheet_name = _make_sheet_name("回答", "回答", used_names)
             answer_df = pd.DataFrame({"回答": answer_text.splitlines() or [""]})
             answer_df.to_excel(writer, sheet_name=answer_sheet_name, index=False)
-            sheet_names = [(answer_sheet_name, len(answer_df) + 1, 1)]
+            sheet_infos.append((answer_sheet_name, None, 1, len(answer_df) + 1, 1))
 
-        # ★罫線・見出しの色・太字・列幅自動調整を、実際にopenpyxlのAPIで全シートに適用する
-        for sheet_name, num_rows, num_cols in sheet_names:
-            _apply_table_style(writer.sheets[sheet_name], num_rows, num_cols)
+        for sheet_name, caption, start_row, num_table_rows, num_cols in sheet_infos:
+            ws = writer.sheets[sheet_name]
+            if caption:
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
+                title_cell = ws.cell(row=1, column=1, value=caption)
+                title_cell.font = Font(bold=True, size=13)
+                title_cell.alignment = Alignment(horizontal="left", vertical="center")
+            # ★罫線・見出しの色・太字・列幅自動調整を、実際にopenpyxlのAPIで適用する
+            _apply_table_style(ws, start_row, num_table_rows, num_cols)
 
     output.seek(0)
     return output.getvalue()
