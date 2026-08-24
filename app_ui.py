@@ -301,11 +301,6 @@ if "extracted_images" not in st.session_state:
     st.session_state.extracted_images = []
 
 # ★重要: 抽出したテキストも画像と同じくsession_stateで永続化する。
-# 以前はローカル変数（combined_text = ""）で、uploaded_filesが空の実行時には
-# 毎回リセットされてしまっていた。extracted_imagesはsession_state管理で
-# 消えない一方、combined_textだけが消えるという非対称な状態になり、
-# 「画像は見えるがCSV等のテキスト内容が見えない」という症状の原因になっていたため、
-# 画像と全く同じ永続化の仕組みに揃える。
 if "combined_text" not in st.session_state:
     st.session_state.combined_text = ""
 
@@ -375,7 +370,7 @@ with st.sidebar:
                             })
                             image_count += 1
                     if image_count > 0:
-                        st.success(f"「{uploaded_file.name}」内の画像 {image_count} 件をAIの「目」として抽出しました")
+                        st.success(f"「{uploaded_file.name}」内の画像 {image_count} 件を抽出しました")
                 except Exception as e:
                     st.warning(
                         f"「{uploaded_file.name}」の画像抽出中にエラーが発生しました（テキストは読み込み済みです）: {e}"
@@ -383,9 +378,6 @@ with st.sidebar:
 
                 # ★新機能: Excelの「グラフ」「図形（オートシェイプ／SmartArt／グループ化した図形）」
                 # 「挿入した埋め込みオブジェクト」で作られた構成図を画像化する。
-                # Windows＋Excelがある環境ではCOM経由（図形単位で高精度に切り出せる）、
-                # それ以外（Streamlit Community CloudなどのLinux）ではLibreOffice経由（シート全体を画像化）
-                # にフォールバックする。
                 uploaded_file.seek(0)
                 file_bytes = uploaded_file.read()
                 if platform.system() == "Windows":
@@ -395,7 +387,7 @@ with st.sidebar:
                 if diagram_images:
                     st.session_state.extracted_images.extend(diagram_images)
                     st.success(
-                        f"「{uploaded_file.name}」内の図形・構成図 {len(diagram_images)} 件をAIの「目」として抽出しました"
+                        f"「{uploaded_file.name}」内の図形・構成図 {len(diagram_images)} 件を抽出しました"
                     )
 
             # ④ ★新機能: CSVファイルが直接アップロードされた場合の処理
@@ -457,13 +449,13 @@ for idx, message in enumerate(st.session_state.messages):
             )
 
 # ユーザーからの入力欄
-if prompt := st.chat_input("アップロードしたすべての資料や図について質問してください..."):
+if prompt := st.chat_input("アップロードしたすべての資料について質問してください..."):
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("assistant"):
-        system_instruction = "あなたは優秀なアシスタントです。提供された【参考資料のテキスト情報】、および添付された「画像（図）」の内容を人間の目のように厳密に確認し、ユーザーの質問に正確に答えてください。画像に描かれているネットワーク構成、サブネット名、IPアドレス等の文字情報もすべて読み取って回答に反映してください。"
+        system_instruction = "あなたは優秀なアシスタントです。提供された【参考資料のテキスト情報】の内容を厳密に確認し、ユーザーの質問に正確に答えてください。"
         # ★session_stateから読む（uploaded_filesがこの実行で空でも、前回抽出したテキストを使える）
         if st.session_state.combined_text:
             system_instruction += f"\n\n【参考資料のテキスト情報】\n{st.session_state.combined_text}"
@@ -471,7 +463,7 @@ if prompt := st.chat_input("アップロードしたすべての資料や図に�
         # AIに送るメッセージを画像対応のマルチモーダル形式に変換
         content_list = [{"type": "text", "text": prompt}]
         
-        # アップロードされたすべての画像（直接添付＋Excel等から抽出したもの）をAIの「目」として添付する
+        # アップロードされたすべての画像（直接添付＋Excel等から抽出したもの）を添付する
         for img_info in st.session_state.extracted_images:
             content_list.append({
                 "type": "image_url",
