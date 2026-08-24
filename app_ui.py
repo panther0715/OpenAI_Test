@@ -19,7 +19,7 @@ from openpyxl import load_workbook
 # load_dotenv(override=True)
 load_dotenv("D:\\OpenAI_Test\\func.env")
 
-# ★環境変数から安全にURLとキーを取得（コード上に直接書かない！）
+# ★ManageAppにてSecretに設定する
 #endpoint = os.getenv("AZURE_AI_ENDPOINT")
 #api_key = os.getenv("AZURE_AI_KEY")
 endpoint = st.secrets["AZURE_AI_ENDPOINT"]
@@ -34,12 +34,6 @@ client = OpenAI(base_url=endpoint, api_key=api_key)
 
 # ★新機能: Excelの「グラフ」「図形（オートシェイプ／SmartArt／グループ化した図形）」
 # 「挿入した埋め込みオブジェクト（Visio図面など）」をまとめて画像化する。
-# 構成図は多くの場合、複数の図形（四角・線・矢印・テキストボックス等）を組み合わせて描かれているか、
-# 「挿入」→「オブジェクト」で貼り込んだ埋め込みオブジェクトになっている。これらはopenpyxlの
-# ws._images（貼り付け画像専用）や単純なChartObjects列挙だけでは取り出せないため、
-# ローカルにインストール済みのExcelをCOM（pywin32）経由で自動操作し、
-# 「シート上の図形をまとめて選択してコピー→仮のグラフに貼り付けてPNGとしてExport」
-# というExcel VBAでもよく使われる手法でスクリーンショット化する。
 # 前提: Windows環境 かつ Microsoft Excelがインストール済み かつ `pip install pywin32` 済みであること。
 def extract_excel_diagrams_via_com(file_bytes, filename):
     images = []
@@ -96,9 +90,6 @@ def extract_excel_diagrams_via_com(file_bytes, filename):
                 continue
 
             # ケース2: 通常のワークシート上にある図形・グラフ・埋め込みオブジェクト。
-            # 単純な貼り付け画像（msoPicture）はopenpyxl側で抽出済みなので除外し、
-            # それ以外（オートシェイプ／グループ化された図形／SmartArt／ネイティブグラフ／
-            # 埋め込みOLEオブジェクト等）は「構成図」の一部である可能性が高いのでまとめて画像化する。
             shape_count = sheet.Shapes.Count
             target_names = []
             for i in range(1, shape_count + 1):
@@ -149,10 +140,6 @@ def extract_excel_diagrams_via_com(file_bytes, filename):
 
 
 # ★新機能: Windows＋Excelが無い環境（Streamlit Community CloudなどのLinux）向けの代替手段。
-# LibreOffice（soffice）をヘッドレスモードで動かし、シートを「見た目どおり」にPDF化 →
-# さらにページ単位のPNG画像に変換する。個々の図形を1つずつ判別するわけではなく、
-# シート全体をレンダリングしてスクリーンショット的に画像化するので、
-# オートシェイプ・SmartArt・グラフ・埋め込みオブジェクトなど種類を問わず「見えているもの」を丸ごと拾える。
 # 前提: システムにLibreOfficeとpoppler-utils（pdftoppmコマンド）が入っていること。
 # Streamlit Community Cloudの場合は、リポジトリ直下に置く packages.txt に
 #   libreoffice
@@ -178,7 +165,6 @@ def extract_excel_pages_via_libreoffice(file_bytes, filename):
 
     try:
         # xlsx -> PDF（シートのレイアウト・図形・グラフを含めて見た目どおりに変換）
-        # 複数プロセスが同時に動いても衝突しないよう、専用のユーザープロファイルを都度使う
         user_profile_dir = os.path.join(tmp_dir, "lo_profile")
         result = subprocess.run(
             [
@@ -305,7 +291,7 @@ if "combined_text" not in st.session_state:
     st.session_state.combined_text = ""
 
 with st.sidebar:
-    st.header("資料・図のアップロード")
+    st.header("資料のアップロード")
     # ★ 拡張子に「png」「jpg」「jpeg」「csv」を追加して、図やCSVを直接ドロップできるように解放
     uploaded_files = st.file_uploader(
         "ファイルを選択してください（複数可）",
