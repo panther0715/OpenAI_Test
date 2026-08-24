@@ -27,26 +27,33 @@ st.caption("PDF、Word、Excel、および画像ファイル（図）をまと�
 client = OpenAI(base_url=endpoint, api_key=api_key)
 
 
-# ★新機能: Excelの「グラフ」機能で作成したネイティブチャートを画像化する
-# ネイティブチャートはxlsx内に画像として保存されておらず描画情報（XML）しか入っていないため、
-# openpyxlでは取り出せない。ローカルにインストール済みのExcelをCOM経由で自動操作し、
-# 各グラフをPNGとしてExportしてから読み込む。
+# ★新機能: Excelの「グラフ」「図形（オートシェイプ／SmartArt／グループ化した図形）」
+# 「挿入した埋め込みオブジェクト（Visio図面など）」をまとめて画像化する。
+# 構成図は多くの場合、複数の図形（四角・線・矢印・テキストボックス等）を組み合わせて描かれているか、
+# 「挿入」→「オブジェクト」で貼り込んだ埋め込みオブジェクトになっている。これらはopenpyxlの
+# ws._images（貼り付け画像専用）や単純なChartObjects列挙だけでは取り出せないため、
+# ローカルにインストール済みのExcelをCOM（pywin32）経由で自動操作し、
+# 「シート上の図形をまとめて選択してコピー→仮のグラフに貼り付けてPNGとしてExport」
+# というExcel VBAでもよく使われる手法でスクリーンショット化する。
 # 前提: Windows環境 かつ Microsoft Excelがインストール済み かつ `pip install pywin32` 済みであること。
-def extract_excel_charts_via_com(file_bytes, filename):
+def extract_excel_diagrams_via_com(file_bytes, filename):
     images = []
 
     try:
         import win32com.client as win32
     except ImportError:
         st.warning(
-            "ネイティブグラフの抽出には pywin32 が必要です。"
+            "図形・オブジェクトの抽出には pywin32 が必要です。"
             "コマンドプロンプトで `pip install pywin32` を実行してください。"
         )
         return images
 
-    xlChart = -4109  # Excel定数 XlSheetType.xlChart（グラフシート判定用）
+    import time
 
-    tmp_dir = tempfile.mkdtemp(prefix="xlsx_chart_")
+    xlChart = -4109  # Excel定数 XlSheetType.xlChart（グラフシート判定用）
+    msoPicture = 13  # 単純な貼り付け画像はopenpyxl側で既に抽出済みのため対象外にする
+
+    tmp_dir = tempfile.mkdtemp(prefix="xlsx_diagram_")
     tmp_xlsx_path = os.path.join(tmp_dir, filename)
     with open(tmp_xlsx_path, "wb") as f:
         f.write(file_bytes)
@@ -60,31 +67,57 @@ def extract_excel_charts_via_com(file_bytes, filename):
         excel.DisplayAlerts = False
         wb = excel.Workbooks.Open(tmp_xlsx_path, ReadOnly=True, UpdateLinks=False)
 
-        chart_index = 0
+        img_index = 0
         for sheet in wb.Sheets:
-            # ケース1: 通常のワークシートに埋め込まれたグラフ（ChartObjects）
-            if sheet.Type != xlChart:
-                for chart_obj in sheet.ChartObjects():
-                    chart_index += 1
-                    img_path = os.path.join(tmp_dir, f"chart_{chart_index}.png")
-                    chart_obj.Chart.Export(img_path, "PNG")
-                    with open(img_path, "rb") as img_f:
-                        images.append({
-                            "data": base64.b64encode(img_f.read()).decode("utf-8"),
-                            "mime": "image/png",
-                        })
-            # ケース2: シート全体がグラフになっている「グラフシート」
-            else:
-                chart_index += 1
-                img_path = os.path.join(tmp_dir, f"chart_{chart_index}.png")
+            # ケース1: シート全体がグラフになっている「グラフシート」
+            if sheet.Type == xlChart:
+                img_index += 1
+                img_path = os.path.join(tmp_dir, f"diagram_{img_index}.png")
                 sheet.Export(img_path, "PNG")
                 with open(img_path, "rb") as img_f:
                     images.append({
                         "data": base64.b64encode(img_f.read()).decode("utf-8"),
                         "mime": "image/png",
                     })
+                continue
+
+            # ケース2: 通常のワークシート上にある図形・グラフ・埋め込みオブジェクト。
+            # 単純な貼り付け画像（msoPicture）はopenpyxl側で抽出済みなので除外し、
+            # それ以外（オートシェイプ／グループ化された図形／SmartArt／ネイティブグラフ／
+            # 埋め込みOLEオブジェクト等）は「構成図」の一部である可能性が高いのでまとめて画像化する。
+            shape_count = sheet.Shapes.Count
+            target_names = []
+            for i in range(1, shape_count + 1):
+                shp = sheet.Shapes.Item(i)
+                if shp.Type != msoPicture:
+                    target_names.append(shp.Name)
+
+            if not target_names:
+                continue
+
+            try:
+                # 複数の図形を一括選択してコピーすると、位置関係を保ったまま1枚の画像になる
+                # （バラバラに描かれた矢印・箱・テキストで構成される構成図でもまとめて取れる）
+                shp_range = sheet.Shapes.Range(target_names)
+                shp_range.Copy()
+                time.sleep(0.3)  # クリップボードへの反映待ち（自動化時のタイミング対策）
+
+                temp_chart_obj = sheet.ChartObjects().Add(0, 0, 600, 400)
+                temp_chart_obj.Chart.Paste()
+                img_index += 1
+                img_path = os.path.join(tmp_dir, f"diagram_{img_index}.png")
+                temp_chart_obj.Chart.Export(img_path, "PNG")
+                temp_chart_obj.Delete()
+
+                with open(img_path, "rb") as img_f:
+                    images.append({
+                        "data": base64.b64encode(img_f.read()).decode("utf-8"),
+                        "mime": "image/png",
+                    })
+            except Exception as shape_e:
+                st.warning(f"「{filename}」の図形抽出中にエラーが発生しました（シート: {sheet.Name}）: {shape_e}")
     except Exception as e:
-        st.warning(f"「{filename}」のネイティブグラフ抽出中にエラーが発生しました: {e}")
+        st.warning(f"「{filename}」の図形・オブジェクト抽出中にエラーが発生しました: {e}")
     finally:
         try:
             if wb is not None:
@@ -178,15 +211,16 @@ with st.sidebar:
                         f"「{uploaded_file.name}」の画像抽出中にエラーが発生しました（テキストは読み込み済みです）: {e}"
                     )
 
-                # ★新機能: Excelの「グラフ」機能で作成したネイティブチャートをExcel COM経由で画像化
+                # ★新機能: Excelの「グラフ」「図形（オートシェイプ／SmartArt／グループ化した図形）」
+                # 「挿入した埋め込みオブジェクト」で作られた構成図をExcel COM経由で画像化
                 # ※Windows環境＋Excelインストール済み＋pywin32導入済みの場合のみ有効
                 uploaded_file.seek(0)
                 file_bytes = uploaded_file.read()
-                chart_images = extract_excel_charts_via_com(file_bytes, uploaded_file.name)
-                if chart_images:
-                    st.session_state.extracted_images.extend(chart_images)
+                diagram_images = extract_excel_diagrams_via_com(file_bytes, uploaded_file.name)
+                if diagram_images:
+                    st.session_state.extracted_images.extend(diagram_images)
                     st.success(
-                        f"「{uploaded_file.name}」内のグラフ {len(chart_images)} 件をAIの「目」として抽出しました"
+                        f"「{uploaded_file.name}」内の図形・構成図 {len(diagram_images)} 件をAIの「目」として抽出しました"
                     )
 
             # ④ ★新機能: 画像ファイル（図）が直接アップロードされた場合の処理
