@@ -7,6 +7,8 @@ from docx import Document
 import pandas as pd
 import base64
 import sys
+import platform
+import subprocess
 import tempfile
 import shutil
 from openpyxl import load_workbook
@@ -144,6 +146,91 @@ def extract_excel_diagrams_via_com(file_bytes, filename):
     return images
 
 
+# ★新機能: Windows＋Excelが無い環境（Streamlit Community CloudなどのLinux）向けの代替手段。
+# LibreOffice（soffice）をヘッドレスモードで動かし、シートを「見た目どおり」にPDF化 →
+# さらにページ単位のPNG画像に変換する。個々の図形を1つずつ判別するわけではなく、
+# シート全体をレンダリングしてスクリーンショット的に画像化するので、
+# オートシェイプ・SmartArt・グラフ・埋め込みオブジェクトなど種類を問わず「見えているもの」を丸ごと拾える。
+# 前提: システムにLibreOfficeとpoppler-utils（pdftoppmコマンド）が入っていること。
+# Streamlit Community Cloudの場合は、リポジトリ直下に置く packages.txt に
+#   libreoffice
+#   poppler-utils
+# と書いておくと、デプロイ時に自動でaptインストールされる。
+def extract_excel_pages_via_libreoffice(file_bytes, filename):
+    images = []
+
+    soffice_path = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice_path:
+        st.info(
+            f"この環境（{platform.system()}）にはLibreOfficeが見つからないため、"
+            "シート全体の画像化はスキップしました。"
+            "Streamlit Community Cloudの場合は、リポジトリに `packages.txt` を追加し、"
+            "`libreoffice` と `poppler-utils` を1行ずつ記載してから再デプロイしてください。"
+        )
+        return images
+
+    tmp_dir = tempfile.mkdtemp(prefix="xlsx_lo_")
+    tmp_xlsx_path = os.path.join(tmp_dir, filename)
+    with open(tmp_xlsx_path, "wb") as f:
+        f.write(file_bytes)
+
+    try:
+        # xlsx -> PDF（シートのレイアウト・図形・グラフを含めて見た目どおりに変換）
+        # 複数プロセスが同時に動いても衝突しないよう、専用のユーザープロファイルを都度使う
+        user_profile_dir = os.path.join(tmp_dir, "lo_profile")
+        result = subprocess.run(
+            [
+                soffice_path,
+                "--headless",
+                "--norestore",
+                f"-env:UserInstallation=file://{user_profile_dir}",
+                "--convert-to", "pdf",
+                "--outdir", tmp_dir,
+                tmp_xlsx_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        pdf_path = os.path.join(tmp_dir, os.path.splitext(os.path.basename(tmp_xlsx_path))[0] + ".pdf")
+        if not os.path.exists(pdf_path):
+            st.warning(
+                f"「{filename}」のPDF変換に失敗しました: {result.stderr.strip() or result.stdout.strip()}"
+            )
+            return images
+
+        pdftoppm_path = shutil.which("pdftoppm")
+        if not pdftoppm_path:
+            st.warning(
+                "poppler-utils（pdftoppmコマンド）が見つからないため、PDFの画像化をスキップしました。"
+                "packages.txt に `poppler-utils` を追加してください。"
+            )
+            return images
+
+        page_prefix = os.path.join(tmp_dir, "page")
+        subprocess.run(
+            [pdftoppm_path, "-png", "-r", "150", pdf_path, page_prefix],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        for fname in sorted(os.listdir(tmp_dir)):
+            if fname.startswith("page") and fname.endswith(".png"):
+                with open(os.path.join(tmp_dir, fname), "rb") as img_f:
+                    images.append({
+                        "data": base64.b64encode(img_f.read()).decode("utf-8"),
+                        "mime": "image/png",
+                    })
+    except Exception as e:
+        st.warning(f"「{filename}」のLibreOffice変換中にエラーが発生しました: {e}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return images
+
+
 # アップロードされた画像を保持するリスト
 if "extracted_images" not in st.session_state:
     st.session_state.extracted_images = []
@@ -222,11 +309,16 @@ with st.sidebar:
                     )
 
                 # ★新機能: Excelの「グラフ」「図形（オートシェイプ／SmartArt／グループ化した図形）」
-                # 「挿入した埋め込みオブジェクト」で作られた構成図をExcel COM経由で画像化
-                # ※Windows環境＋Excelインストール済み＋pywin32導入済みの場合のみ有効
+                # 「挿入した埋め込みオブジェクト」で作られた構成図を画像化する。
+                # Windows＋Excelがある環境ではCOM経由（図形単位で高精度に切り出せる）、
+                # それ以外（Streamlit Community CloudなどのLinux）ではLibreOffice経由（シート全体を画像化）
+                # にフォールバックする。
                 uploaded_file.seek(0)
                 file_bytes = uploaded_file.read()
-                diagram_images = extract_excel_diagrams_via_com(file_bytes, uploaded_file.name)
+                if platform.system() == "Windows":
+                    diagram_images = extract_excel_diagrams_via_com(file_bytes, uploaded_file.name)
+                else:
+                    diagram_images = extract_excel_pages_via_libreoffice(file_bytes, uploaded_file.name)
                 if diagram_images:
                     st.session_state.extracted_images.extend(diagram_images)
                     st.success(
