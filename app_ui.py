@@ -13,7 +13,10 @@ import platform
 import subprocess
 import tempfile
 import shutil
+import unicodedata
 from openpyxl import load_workbook
+from openpyxl.styles import Border, Side, PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 
 # ★同じフォルダにある「.env」ファイルから設定を自動で読み込む
 # load_dotenv(override=True)
@@ -262,21 +265,80 @@ def _parse_markdown_tables(text):
     return tables
 
 
+def _display_width(text):
+    # 列幅の自動調整用。日本語などの全角文字は半角の約2倍の幅として数える
+    # （len()だけで数えると全角文字が多い列の幅が実際より狭く計算されてしまうため）。
+    width = 0
+    for ch in text:
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _apply_table_style(ws, num_rows, num_cols):
+    """罫線（外枠：太線／内側：細線）、見出し行（背景色＋太字）、列幅自動調整をまとめて適用する。
+    AIの回答テキストにはこうした書式の指定は含められない（pandas.to_excelは値だけを書き込み、
+    セルの見た目は一切設定しない）ため、生成側のコードでopenpyxlを使って直接設定する。
+    """
+    thin = Side(style="thin", color="000000")
+    thick = Side(style="thick", color="000000")
+
+    # 罫線: 外枠は太線、内側は細線
+    for row in range(1, num_rows + 1):
+        for col in range(1, num_cols + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.border = Border(
+                top=thick if row == 1 else thin,
+                bottom=thick if row == num_rows else thin,
+                left=thick if col == 1 else thin,
+                right=thick if col == num_cols else thin,
+            )
+
+    # 見出し行（1行目）: 背景色（薄い青）＋太字＋中央揃え
+    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    for col in range(1, num_cols + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.fill = header_fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # 列幅: 折り返しなしで全て見えるよう、各列の最大文字幅＋余白に自動調整
+    for col in range(1, num_cols + 1):
+        col_letter = get_column_letter(col)
+        max_width = 0
+        for row in range(1, num_rows + 1):
+            value = ws.cell(row=row, column=col).value
+            if value is not None:
+                max_width = max(max_width, _display_width(str(value)))
+        ws.column_dimensions[col_letter].width = max_width + 4
+
+
 def answer_to_excel_bytes(answer_text):
     output = io.BytesIO()
     tables = _parse_markdown_tables(answer_text)
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         if tables:
+            sheet_names = []
             for idx, df in enumerate(tables, start=1):
-                df.to_excel(writer, sheet_name=f"表{idx}"[:31], index=False)
-            pd.DataFrame({"回答全文": answer_text.splitlines() or [""]}).to_excel(
-                writer, sheet_name="回答全文"[:31], index=False
-            )
+                sheet_name = f"表{idx}"[:31]
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                sheet_names.append((sheet_name, len(df) + 1, len(df.columns)))
+            answer_sheet_name = "回答全文"[:31]
+            answer_df = pd.DataFrame({"回答全文": answer_text.splitlines() or [""]})
+            answer_df.to_excel(writer, sheet_name=answer_sheet_name, index=False)
+            sheet_names.append((answer_sheet_name, len(answer_df) + 1, 1))
         else:
-            pd.DataFrame({"回答": answer_text.splitlines() or [""]}).to_excel(
-                writer, sheet_name="回答"[:31], index=False
-            )
+            answer_sheet_name = "回答"[:31]
+            answer_df = pd.DataFrame({"回答": answer_text.splitlines() or [""]})
+            answer_df.to_excel(writer, sheet_name=answer_sheet_name, index=False)
+            sheet_names = [(answer_sheet_name, len(answer_df) + 1, 1)]
+
+        # ★罫線・見出しの色・太字・列幅自動調整を、実際にopenpyxlのAPIで全シートに適用する
+        for sheet_name, num_rows, num_cols in sheet_names:
+            _apply_table_style(writer.sheets[sheet_name], num_rows, num_cols)
 
     output.seek(0)
     return output.getvalue()
