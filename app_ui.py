@@ -227,14 +227,32 @@ def extract_excel_pages_via_libreoffice(file_bytes, filename):
 # 含まれていればそれを解析してpandas.DataFrame化し、表ごとに別シートとして書き出す。
 # 表が見つからない場合も、回答全文を1シートに書き出して必ずダウンロードできるようにする。
 def _clean_caption(raw_lines):
-    # 表の直前にある見出し行（「1. 全体構成（...）」等）をシート名／タイトルとして使えるように、
-    # Markdownの見出し記号（#）や強調記号（**）を軽く取り除く。
-    text_lines = [l.strip() for l in raw_lines if l.strip()]
-    if not text_lines:
+    # 表の直前にある見出し行（「1. 全体構成（...）」等）をシート名／タイトルとして使う。
+    # ただし、表からさらに離れた場所にある文章（冒頭の前置き等）を、空行を挟んだ先まで
+    # 遡って誤って見出しとして使ってしまわないよう、表に直接隣接する
+    # 「連続したテキスト行のまとまり」だけを対象にする。
+    lines = list(raw_lines)
+    while lines and not lines[-1].strip():  # 末尾の空行を無視
+        lines.pop()
+    if not lines:
         return ""
-    caption = text_lines[-1]  # 表の直前の行を要約タイトルとして使う
-    caption = re.sub(r'^#+\s*', '', caption)
-    caption = caption.strip('*').strip()
+
+    block = []
+    for line in reversed(lines):
+        if not line.strip():
+            break  # 空行に達したら、それより前（別の段落）は見出しとして使わない
+        block.append(line.strip())
+    block.reverse()
+    caption = " ".join(block)
+    caption = re.sub(r'^#+\s*', '', caption)  # Markdown見出し記号（#）
+    caption = caption.strip('*').strip()      # 強調記号（**）
+
+    # 「。」「！」「？」などで終わる完結した文章は、見出しではなく説明文の可能性が高いので
+    # 見出しとして採用しない（表番号1個目に前置きの文章が紛れ込むのを防ぐ）。
+    if caption.endswith(("。", "．", ".", "！", "!", "？", "?")):
+        return ""
+    if len(caption) > 200:  # 明らかに長すぎる場合（説明文の可能性）の保険。見出しの列挙は許容する
+        return ""
     return caption
 
 
@@ -549,13 +567,17 @@ for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message["role"] == "assistant":
+            excel_bytes = answer_to_excel_bytes(message["content"])
             st.download_button(
                 label="📥 Excelでダウンロード",
-                data=answer_to_excel_bytes(message["content"]),
+                data=excel_bytes,
                 file_name=f"ai_answer_{idx + 1}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"download_excel_history_{idx}",
             )
+            # ★デバッグ用: 実際にどんなシート名で書き出されたかをその場で確認できるようにする。
+            # 「表名がシート名に反映されない」という問題の切り分けに使う。
+            st.caption(f"生成されたシート名: {', '.join(load_workbook(io.BytesIO(excel_bytes)).sheetnames)}")
 
 # ユーザーからの入力欄
 if prompt := st.chat_input("アップロードしたすべての資料について質問してください..."):
@@ -589,12 +611,15 @@ if prompt := st.chat_input("アップロードしたすべての資料につい�
         answer = response.choices[0].message.content
         st.markdown(answer)
 
+        excel_bytes = answer_to_excel_bytes(answer)
         st.download_button(
             label="📥 Excelでダウンロード",
-            data=answer_to_excel_bytes(answer),
+            data=excel_bytes,
             file_name=f"ai_answer_{len(st.session_state.messages) + 1}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"download_excel_new_{len(st.session_state.messages)}",
         )
+        # ★デバッグ用: 実際にどんなシート名で書き出されたかをその場で確認できるようにする。
+        st.caption(f"生成されたシート名: {', '.join(load_workbook(io.BytesIO(excel_bytes)).sheetnames)}")
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
